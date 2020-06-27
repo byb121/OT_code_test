@@ -10,3 +10,4 @@ htmlcov/
 /dist
 *.egg-info
 .pytest_cache/
+.vscode
