@@ -1,11 +1,11 @@
 import argparse
 import gzip
 import json
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 from heapq import nlargest
 from statistics import median
 from datetime import datetime
-# import concurrent.futures
+from multiprocessing import Pool, cpu_count
 
 
 def setup_args():
@@ -31,12 +31,18 @@ def setup_args():
         action='store_true',
         help='count target pairs sharing a connection to at least to diseases')
 
+    parser.add_argument(
+        '-p', '--multi_threads',
+        action='store_true',
+        help='use all cpus')
+
+
     args = parser.parse_args()
     return args
 
 
 def get_dict_from_file(in_file: str):
-    # print(f'{datetime.now()}: start to process file')
+    print(f'{datetime.now()}: start to process file')
     tar_dis = {}
     with gzip.open(in_file, 'rb') as f:
         for line in f:
@@ -53,7 +59,7 @@ def get_dict_from_file(in_file: str):
     return tar_dis
 
 
-def read_and_output_associations(in_file: str, out_file: str, count: bool) -> None:
+def read_and_output_associations(in_file: str, out_file: str, count: bool, multi_threads: bool) -> None:
 
     # make sure output is writable
     with open(out_file, 'w') as f:
@@ -62,11 +68,13 @@ def read_and_output_associations(in_file: str, out_file: str, count: bool) -> No
         )
 
     evi_dict = get_dict_from_file(in_file)
+    print(f'{datetime.now()}: parsing data')
     evi_dict = {
         evi: (median(evi_dict[evi]), evi_dict[evi])
         for evi in evi_dict
     }
     # start to write output
+    print(f'{datetime.now()}: write to the output')
     with open(out_file, 'a') as f:
         for a_pair, median_scores in sorted(evi_dict.items(), key=lambda x: x[1][0]):
             # print(a_pair, scores)
@@ -83,16 +91,15 @@ def read_and_output_associations(in_file: str, out_file: str, count: bool) -> No
                 ) + '\n'
             )
     if count:
-        # print(f'{datetime.now()}: start to count')
+        print(f'{datetime.now()}: start to count')
         evi_dict_keys = list(evi_dict.keys())
         evi_dict.clear()
+        result = count_pairs_sharing_connection(evi_dict_keys, multi_threads)
         print(
-            'number of target pairs sharing connection to at least two diseases: ',
-            count_pairs_sharing_connection(evi_dict_keys)
-        )
+            f'{datetime.now()}: number of target pairs sharing connection to at least two diseases: {result}')
 
 
-def count_pairs_sharing_connection(evi_keys: List[Tuple[str,str]]) -> int:
+def count_pairs_sharing_connection(evi_keys: List[Tuple[str,str]], multi_threads: bool) -> int:
     tar_dis = {}
     for a_pair in evi_keys:
         target, disease = a_pair
@@ -100,7 +107,7 @@ def count_pairs_sharing_connection(evi_keys: List[Tuple[str,str]]) -> int:
             tar_dis[target].append(disease)
         else:
             tar_dis[target] = [disease]
-    # print(f'{datetime.now()}: tar_dis is completed')
+    print(f'{datetime.now()}: tar_dis is completed')
 
     # loop through dict once, remove single disease targets, and convert list to set
     all_targets = list(tar_dis.keys())
@@ -113,9 +120,37 @@ def count_pairs_sharing_connection(evi_keys: List[Tuple[str,str]]) -> int:
 
     # loop through dict second time
     all_targets = list(tar_dis.keys())
-    eligible_pairs_count = 0
+    if(len(all_targets) == 1):
+        # if only one target is left
+        return 0
+    if multi_threads:
+        # range step is trying to slice all_targets into cpu*2 chunks.
+        # Earlier chunks takes much longer time, 
+        # and later chunks runs much faster as fewer comparisons to go through,
+        # so having much chunks to ensure faster process onces finishes can pick up a later/faster job.
+        slice_index = [i for i in range(0, len(all_targets)-1, int((len(all_targets)-1)/(cpu_count()*2)+1))]
+        index_ranges = []
+        for i in range(len(slice_index)):
+            if(i == 0):
+                index_ranges.append((0, slice_index[1]))
+                continue
+            if(i == len(slice_index) - 1):
+                index_ranges.append((slice_index[i]+1, len(all_targets)-1))
+                continue
+            index_ranges.append((slice_index[i]+1, slice_index[i+1]))
 
-    for i in range(len(all_targets)):
+        count_lits = Pool().map(
+            count_it_in_a_slice_of_list, [(start, stop, all_targets, tar_dis) for (start, stop) in index_ranges]
+        )
+        return sum(count_lits)
+    else:
+        return count_it_in_a_slice_of_list((0, len(all_targets)-1, all_targets, tar_dis))
+
+
+def count_it_in_a_slice_of_list(args: Tuple[Any]) -> int:
+    (start, stop, all_targets, tar_dis) = args
+    eligible_pairs_count = 0
+    for i in range(start, stop+1):
         for j in range(i+1, len(all_targets)):
             # if one target has more than 1 common diseases with another target
             if len(
@@ -124,53 +159,8 @@ def count_pairs_sharing_connection(evi_keys: List[Tuple[str,str]]) -> int:
                 eligible_pairs_count += 1
     return eligible_pairs_count
 
-# NOTE tried to use more CPU, did not gain any better performance
-# def count_pairs_sharing_connection_2(evi_keys: List[Tuple[str,str]]) -> None:
-#     tar_dis = {}
-#     for a_pair in evi_keys:
-#         target, disease = a_pair
-#         if target in tar_dis:
-#             tar_dis[target].append(disease)
-#         else:
-#             tar_dis[target] = [disease]
-#     print(f'{datetime.now()}: tar_dis is completed')
-#
-#     # loop through dict once, remove single disease targets, and convert list to set
-#     all_targets = list(tar_dis.keys())
-#     for a_tar in all_targets:
-#         temp = set(tar_dis[a_tar])
-#         if len(temp) > 1:
-#             tar_dis[a_tar] = temp
-#         else:
-#             del(tar_dis[a_tar])
-#
-#     # loop through dict second time
-#     all_targets = list(tar_dis.keys())
-#     eligible_pairs_count = 0
-#     results = []
-#
-#     with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
-#         for result in executor.map(
-#             compare_target_to_others,
-#             [(index, all_targets, tar_dis) for index in range(len(all_targets))]
-#         ):
-#             results.append(result)
-#     return sum(results)
-#
-#
-# def compare_target_to_others(index_targets_dict: Tuple[int, List[str], Dict[str, list]]) -> int:
-#     index, all_targets, tar_dis = index_targets_dict
-#     count = 0
-#     for j in range(index+1, len(all_targets)):
-#         if len(
-#             tar_dis[all_targets[index]] & tar_dis[all_targets[j]]
-#         ) > 1:
-#             count += 1
-#     return count
-
 
 if __name__ == "__main__":
     # setup arguments
     args = setup_args()
-    # print(args)
-    read_and_output_associations(args.input, args.csv_output, args.count)
+    read_and_output_associations(args.input, args.csv_output, args.count, args.multi_threads)
